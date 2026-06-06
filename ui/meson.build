@@ -70,6 +70,20 @@ if opengl.found()
   ui_modules += {'egl-headless' : egl_headless_ss}
 endif
 
+if opengl.found()
+  gvt_stream_ss = ss.source_set()
+  gvt_stream_gst = [
+    dependency('gstreamer-1.0'),
+    dependency('gstreamer-app-1.0'),
+    dependency('gstreamer-allocators-1.0'),
+    dependency('gstreamer-video-1.0'),
+    dependency('libdrm'),
+  ]
+  gvt_stream_ss.add(when: [opengl, pixman],
+                    if_true: [files('gvt-stream.c'), gbm, gvt_stream_gst])
+  ui_modules += {'gvt-stream' : gvt_stream_ss}
+endif
+
 dbus_display1 = files()
 if dbus_display
   dbus_ss = ss.source_set()
