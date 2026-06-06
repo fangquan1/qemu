@@ -219,6 +219,7 @@ static void audio_create_pdos(Audiodev *dev)
 #ifdef CONFIG_SPICE
         CASE(SPICE, spice, );
 #endif
+        CASE(GVT_RTP, gvt_rtp, );
         CASE(WAV, wav, );
 
     case AUDIODEV_DRIVER__MAX:
@@ -316,6 +317,8 @@ static AudiodevPerDirectionOptions *audio_get_pdo_out(Audiodev *dev)
     case AUDIODEV_DRIVER_SPICE:
         return dev->u.spice.out;
 #endif
+    case AUDIODEV_DRIVER_GVT_RTP:
+        return dev->u.gvt_rtp.out;
     case AUDIODEV_DRIVER_WAV:
         return dev->u.wav.out;
 
@@ -375,6 +378,8 @@ static AudiodevPerDirectionOptions *audio_get_pdo_in(Audiodev *dev)
     case AUDIODEV_DRIVER_SPICE:
         return dev->u.spice.in;
 #endif
+    case AUDIODEV_DRIVER_GVT_RTP:
+        return dev->u.gvt_rtp.in;
     case AUDIODEV_DRIVER_WAV:
         return dev->u.wav.in;
 

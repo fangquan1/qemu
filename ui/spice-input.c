@@ -170,11 +170,11 @@ static void tablet_set_logical_size(SpiceTabletInstance* sin, int width, int hei
 {
     QemuSpicePointer *pointer = container_of(sin, QemuSpicePointer, tablet);
 
-    if (height < 16) {
-        height = 16;
+    if (height <= 16) {
+        height = INPUT_EVENT_ABS_MAX;
     }
-    if (width < 16) {
-        width = 16;
+    if (width <= 16) {
+        width = INPUT_EVENT_ABS_MAX;
     }
     pointer->width  = width;
     pointer->height = height;
@@ -184,10 +184,18 @@ static void tablet_position(SpiceTabletInstance* sin, int x, int y,
                             uint32_t buttons_state)
 {
     QemuSpicePointer *pointer = container_of(sin, QemuSpicePointer, tablet);
+    int width = pointer->width;
+    int height = pointer->height;
 
     spice_update_buttons(pointer, 0, buttons_state);
-    qemu_input_queue_abs(NULL, INPUT_AXIS_X, x, 0, pointer->width);
-    qemu_input_queue_abs(NULL, INPUT_AXIS_Y, y, 0, pointer->height);
+    if (width <= 16) {
+        width = INPUT_EVENT_ABS_MAX;
+    }
+    if (height <= 16) {
+        height = INPUT_EVENT_ABS_MAX;
+    }
+    qemu_input_queue_abs(NULL, INPUT_AXIS_X, x, 0, width);
+    qemu_input_queue_abs(NULL, INPUT_AXIS_Y, y, 0, height);
     qemu_input_event_sync();
 }
 
@@ -252,6 +260,14 @@ void qemu_spice_input_init(void)
     pointer->mouse.base.sif  = &mouse_interface.base;
     pointer->tablet.base.sif = &tablet_interface.base;
     qemu_spice.add_interface(&pointer->mouse.base);
+    /*
+     * A normal SpiceDisplay widget calls set_logical_size() before sending
+     * tablet positions.  Our gvt-stream client intentionally uses
+     * -spice display=none, so no Spice display channel exists to provide that
+     * size.  Keep a sane 0..0x7fff coordinate space for input-only clients.
+     */
+    pointer->width = INPUT_EVENT_ABS_MAX;
+    pointer->height = INPUT_EVENT_ABS_MAX;
 
     pointer->absolute = false;
     pointer->mouse_mode.notify = mouse_mode_notifier;

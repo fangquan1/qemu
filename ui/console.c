@@ -587,12 +587,12 @@ static bool console_compatible_with(QemuConsole *con,
         return false;
 
     }
-
-    if (flags & GRAPHIC_FLAGS_DMABUF &&
-        !displaychangelistener_has_dmabuf(dcl)) {
-        error_setg(errp, "The console requires display DMABUF support.");
-        return false;
-    }
+    // bypass
+    // if (flags & GRAPHIC_FLAGS_DMABUF &&
+    //     !displaychangelistener_has_dmabuf(dcl)) {
+    //     error_setg(errp, "The console requires display DMABUF support.");
+    //     return false;
+    // }
 
     return true;
 }

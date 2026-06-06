@@ -386,6 +386,8 @@ AudiodevPerDirectionOptions *glue(audio_get_pdo_, TYPE)(Audiodev *dev)
     case AUDIODEV_DRIVER_SPICE:
         return dev->u.spice.TYPE;
 #endif
+    case AUDIODEV_DRIVER_GVT_RTP:
+        return dev->u.gvt_rtp.TYPE;
     case AUDIODEV_DRIVER_WAV:
         return dev->u.wav.TYPE;
 

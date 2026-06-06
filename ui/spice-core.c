@@ -847,21 +847,26 @@ static void qemu_spice_init(void)
     g_free(x509_cacert_file);
     g_free(password);
 
+#if SPICE_SERVER_VERSION >= 0x000f03 /* release 0.15.3 */
+    const char *video_codec = qemu_opt_get(opts, "video-codec");
+
+    if (video_codec) {
+        g_autofree char *enc_codec = g_strconcat("gstreamer:", video_codec, NULL);
+
+        if (spice_server_set_video_codecs(spice_server, enc_codec)) {
+            error_report("invalid video codec");
+            exit(1);
+        }
+    }
+#endif
+
 #ifdef HAVE_SPICE_GL
     if (qemu_opt_get_bool(opts, "gl", 0)) {
         if ((port != 0) || (tls_port != 0)) {
 #if SPICE_SERVER_VERSION >= 0x000f03 /* release 0.15.3 */
-            const char *video_codec = NULL;
-            g_autofree char *enc_codec = NULL;
-
             spice_remote_client = 1;
-
-            video_codec = qemu_opt_get(opts, "video-codec");
-            if (video_codec) {
-                enc_codec = g_strconcat("gstreamer:", video_codec, NULL);
-            }
-            if (spice_server_set_video_codecs(spice_server,
-                                              enc_codec ?: "gstreamer:h264")) {
+            if (!video_codec && spice_server_set_video_codecs(spice_server,
+                                                              "gstreamer:h264")) {
                 error_report("invalid video codec");
                 exit(1);
             }

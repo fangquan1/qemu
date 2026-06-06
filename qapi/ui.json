@@ -1365,6 +1365,28 @@
   'data'    : { '*rendernode' : 'str' } }
 
 ##
+# @DisplayGVTStream:
+#
+# GVT-g stream diagnostic display options.
+#
+# @rendernode: Which DRM render node should be used.  Default is the
+#     first available node on the host.
+#
+# @host: Target client host kept for the future streaming transport.
+#
+# @port: Target client port kept for the future streaming transport.
+#
+# @codec: Target codec kept for the future streaming transport.
+#
+# Since: 10.2
+##
+{ 'struct'  : 'DisplayGVTStream',
+  'data'    : { '*rendernode' : 'str',
+                '*host'       : 'str',
+                '*port'       : 'uint16',
+                '*codec'      : 'str' } }
+
+##
 # @DisplayDBus:
 #
 # DBus display options.
@@ -1498,6 +1520,10 @@
 #     DRI device.  Graphical display need to be paired with VNC or
 #     Spice.  (Since 3.1)
 #
+# @gvt-stream: No user interface, attach a GVT-g DMABUF diagnostic
+#     listener to the QEMU display path.  This is an experimental
+#     backend for host-side streaming development.  (Since 10.2)
+#
 # @curses: Display video output via curses.  For graphics device
 #     models which support a text mode, QEMU can display this output
 #     using a curses/ncurses interface.  Nothing is displayed when the
@@ -1522,6 +1548,7 @@
     { 'name': 'gtk', 'if': 'CONFIG_GTK' },
     { 'name': 'sdl', 'if': 'CONFIG_SDL' },
     { 'name': 'egl-headless', 'if': 'CONFIG_OPENGL' },
+    { 'name': 'gvt-stream', 'if': 'CONFIG_OPENGL' },
     { 'name': 'curses', 'if': 'CONFIG_CURSES' },
     { 'name': 'cocoa', 'if': 'CONFIG_COCOA' },
     { 'name': 'spice-app', 'if': 'CONFIG_SPICE' },
@@ -1562,6 +1589,8 @@
       'curses': { 'type': 'DisplayCurses', 'if': 'CONFIG_CURSES' },
       'egl-headless': { 'type': 'DisplayEGLHeadless',
                         'if': 'CONFIG_OPENGL' },
+      'gvt-stream': { 'type': 'DisplayGVTStream',
+                      'if': 'CONFIG_OPENGL' },
       'dbus': { 'type': 'DisplayDBus', 'if': 'CONFIG_DBUS_DISPLAY' },
       'sdl': { 'type': 'DisplaySDL', 'if': 'CONFIG_SDL' }
   }

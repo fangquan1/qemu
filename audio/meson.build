@@ -1,4 +1,11 @@
 audio_ss = ss.source_set()
+gvt_audio_gst = [
+  dependency('gstreamer-1.0'),
+  dependency('gstreamer-app-1.0'),
+  dependency('gstreamer-audio-1.0'),
+]
+
+audio_ss.add(gvt_audio_gst)
 audio_ss.add(files(
   'audio.c',
   'audio-be.c',
@@ -6,6 +13,7 @@ audio_ss.add(files(
   'mixeng.c',
   'noaudio.c',
   'wavaudio.c',
+  'gvt-rtp-audio.c',
 ))
 
 # deprecated since v10.2, to be removed

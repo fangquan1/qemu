@@ -121,6 +121,8 @@ void qemu_spice_wakeup(SimpleSpiceDisplay *ssd)
     spice_qxl_wakeup(&ssd->qxl);
 }
 
+static void qemu_spice_gvtg_note_update(int width, int height);
+
 static void qemu_spice_create_one_update(SimpleSpiceDisplay *ssd,
                                          QXLRect *rect)
 {
@@ -131,6 +133,8 @@ static void qemu_spice_create_one_update(SimpleSpiceDisplay *ssd,
     int bw, bh;
     struct timespec time_space;
     pixman_image_t *dest;
+    bool gvtg_fast_fullscreen_copy = false;
+    const char *gvtg_stream_mode;
 
     trace_qemu_spice_create_update(
            rect->left, rect->right,
@@ -173,20 +177,188 @@ static void qemu_spice_create_one_update(SimpleSpiceDisplay *ssd,
     image->bitmap.palette = 0;
     image->bitmap.format = SPICE_BITMAP_FMT_32BIT;
 
-    dest = pixman_image_create_bits(PIXMAN_LE_x8r8g8b8, bw, bh,
-                                    (void *)update->bitmap, bw * 4);
-    pixman_image_composite(PIXMAN_OP_SRC, ssd->surface, NULL, ssd->mirror,
-                           rect->left, rect->top, 0, 0,
-                           rect->left, rect->top, bw, bh);
-    pixman_image_composite(PIXMAN_OP_SRC, ssd->mirror, NULL, dest,
-                           rect->left, rect->top, 0, 0,
-                           0, 0, bw, bh);
-    pixman_image_unref(dest);
+    gvtg_stream_mode = getenv("SPICE_GVTG_STREAM_MODE");
+    gvtg_fast_fullscreen_copy = gvtg_stream_mode &&
+        g_strcmp0(gvtg_stream_mode, "fullscreen") == 0 &&
+        rect->left == 0 && rect->top == 0 &&
+        ssd->ds && bw == surface_width(ssd->ds) &&
+        bh == surface_height(ssd->ds) &&
+        surface_bytes_per_pixel(ssd->ds) == 4;
+
+    if (gvtg_fast_fullscreen_copy) {
+        uint8_t *src = surface_data(ssd->ds);
+        uint8_t *dst = update->bitmap;
+        int src_stride = surface_stride(ssd->ds);
+        int dst_stride = bw * 4;
+
+        /*
+         * Fullscreen streaming sends a complete desktop frame on a fixed cadence.
+         * The normal simple-display path first refreshes the shadow mirror and
+         * then copies from that mirror into this QXL bitmap so later dirty-block
+         * detection can compare against it. In explicit fullscreen stream mode
+         * that diff path is bypassed between ticks, so copying the current scanout
+         * directly avoids one full 1920x1200 memory pass per frame.
+         */
+        if (src_stride == dst_stride) {
+            memcpy(dst, src, (size_t)dst_stride * bh);
+        } else {
+            int y;
+
+            for (y = 0; y < bh; y++) {
+                memcpy(dst + (size_t)y * dst_stride,
+                       src + (size_t)y * src_stride,
+                       dst_stride);
+            }
+        }
+    } else {
+        dest = pixman_image_create_bits(PIXMAN_LE_x8r8g8b8, bw, bh,
+                                        (void *)update->bitmap, bw * 4);
+        pixman_image_composite(PIXMAN_OP_SRC, ssd->surface, NULL, ssd->mirror,
+                               rect->left, rect->top, 0, 0,
+                               rect->left, rect->top, bw, bh);
+        pixman_image_composite(PIXMAN_OP_SRC, ssd->mirror, NULL, dest,
+                               rect->left, rect->top, 0, 0,
+                               0, 0, bw, bh);
+        pixman_image_unref(dest);
+    }
 
     cmd->type = QXL_CMD_DRAW;
     cmd->data = (uintptr_t)drawable;
 
     QTAILQ_INSERT_TAIL(&ssd->updates, update, next);
+    ssd->updates_count++;
+    qemu_spice_gvtg_note_update(bw, bh);
+}
+
+static bool qemu_spice_gvtg_coalesce_updates(void)
+{
+    const char *env = getenv("SPICE_GVTG_COALESCE_UPDATE");
+
+    return !env || g_strcmp0(env, "0") != 0;
+}
+
+static bool qemu_spice_gvtg_stats_enabled(void)
+{
+    const char *env = getenv("SPICE_GVTG_STATS");
+
+    return !env || g_strcmp0(env, "0") != 0;
+}
+
+static bool qemu_spice_gvtg_bbox_coalesce_updates(void)
+{
+    const char *env = getenv("SPICE_GVTG_BBOX_COALESCE");
+
+    return !env || g_strcmp0(env, "0") != 0;
+}
+
+static int qemu_spice_gvtg_bbox_min_blocks(void)
+{
+    const char *env = getenv("SPICE_GVTG_BBOX_MIN_BLOCKS");
+    int value = env ? atoi(env) : 64;
+
+    return MAX(value, 8);
+}
+
+static bool qemu_spice_gvtg_fullscreen_coalesce(void)
+{
+    const char *env = getenv("SPICE_GVTG_FULLSCREEN_COALESCE");
+
+    return !env || g_strcmp0(env, "0") != 0;
+}
+
+static int qemu_spice_gvtg_fullscreen_percent(void)
+{
+    const char *env = getenv("SPICE_GVTG_FULLSCREEN_PERCENT");
+    int value = env ? atoi(env) : 70;
+
+    return MAX(50, MIN(value, 100));
+}
+
+static bool qemu_spice_gvtg_stream_fullscreen(void)
+{
+    const char *env = getenv("SPICE_GVTG_STREAM_MODE");
+
+    return env && g_strcmp0(env, "fullscreen") == 0;
+}
+
+static int qemu_spice_gvtg_stream_fps(void)
+{
+    const char *env = getenv("SPICE_GVTG_STREAM_FPS");
+    int value = env ? atoi(env) : 60;
+
+    return MAX(1, MIN(value, 75));
+}
+
+static int qemu_spice_gvtg_stream_queue_depth(void)
+{
+    const char *env = getenv("SPICE_GVTG_STREAM_QUEUE_DEPTH");
+    int value = env ? atoi(env) : 2;
+
+    return MAX(1, MIN(value, 4));
+}
+
+static bool qemu_spice_gvtg_stream_due(SimpleSpiceDisplay *ssd, int64_t now_ms)
+{
+    int fps = qemu_spice_gvtg_stream_fps();
+    int interval_ms = MAX(1, 1000 / fps);
+
+    return !ssd->gvtg_last_stream_ms ||
+           now_ms - ssd->gvtg_last_stream_ms >= interval_ms;
+}
+
+static void qemu_spice_gvtg_create_fullscreen_stream_frame(SimpleSpiceDisplay *ssd,
+                                                           int64_t now_ms)
+{
+    QXLRect update = {
+        .top = 0,
+        .bottom = surface_height(ssd->ds),
+        .left = 0,
+        .right = surface_width(ssd->ds),
+    };
+
+    qemu_spice_create_one_update(ssd, &update);
+    memset(&ssd->dirty, 0, sizeof(ssd->dirty));
+    ssd->gvtg_last_stream_ms = now_ms;
+}
+
+static void qemu_spice_gvtg_note_update(int width, int height)
+{
+    static int64_t last_ms;
+    static uint64_t rects;
+    static uint64_t pixels;
+    static uint64_t bytes;
+    static uint64_t tiny_rects;
+    int64_t now_ms;
+
+    if (!qemu_spice_gvtg_stats_enabled()) {
+        return;
+    }
+
+    now_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    if (!last_ms) {
+        last_ms = now_ms;
+    }
+
+    rects++;
+    pixels += (uint64_t)width * height;
+    bytes += (uint64_t)width * height * 4;
+    if (width < 320 || height < 180) {
+        tiny_rects++;
+    }
+
+    if (now_ms - last_ms >= 1000) {
+        warn_report("gvtg-stats: qemu updates rects=%" PRIu64
+                    " tiny=%" PRIu64 " raw=%.2f MiB/s pixels=%.2f Mpix/s approx_rect_fps=%.1f",
+                    rects, tiny_rects,
+                    (double)bytes * 1000.0 / (double)(now_ms - last_ms) / 1024.0 / 1024.0,
+                    (double)pixels * 1000.0 / (double)(now_ms - last_ms) / 1000000.0,
+                    (double)rects * 1000.0 / (double)(now_ms - last_ms));
+        last_ms = now_ms;
+        rects = 0;
+        pixels = 0;
+        bytes = 0;
+        tiny_rects = 0;
+    }
 }
 
 static void qemu_spice_create_update(SimpleSpiceDisplay *ssd)
@@ -197,18 +369,85 @@ static void qemu_spice_create_update(SimpleSpiceDisplay *ssd)
     int y, yoff1, yoff2, x, xoff, blk, bw;
     int bpp = surface_bytes_per_pixel(ssd->ds);
     uint8_t *guest, *mirror;
+    QXLRect changed = { 0 };
+    int changed_blocks = 0;
+    int changed_area = 0;
+    int surface_area = surface_width(ssd->ds) * surface_height(ssd->ds);
 
     if (qemu_spice_rect_is_empty(&ssd->dirty)) {
         return;
     };
+
+    guest = surface_data(ssd->ds);
+    mirror = (void *)pixman_image_get_data(ssd->mirror);
+
+    if (qemu_spice_gvtg_bbox_coalesce_updates()) {
+        for (y = ssd->dirty.top; y < ssd->dirty.bottom; y++) {
+            yoff1 = y * surface_stride(ssd->ds);
+            yoff2 = y * pixman_image_get_stride(ssd->mirror);
+            for (x = ssd->dirty.left; x < ssd->dirty.right; x += blksize) {
+                xoff = x * bpp;
+                bw = MIN(blksize, ssd->dirty.right - x);
+                if (memcmp(guest + yoff1 + xoff,
+                           mirror + yoff2 + xoff,
+                           bw * bpp) != 0) {
+                    QXLRect block = {
+                        .top = y,
+                        .bottom = y + 1,
+                        .left = x,
+                        .right = x + bw,
+                    };
+                    qemu_spice_rect_union(&changed, &block);
+                    changed_blocks++;
+                    changed_area += bw;
+                }
+            }
+        }
+
+        if (!qemu_spice_rect_is_empty(&changed)) {
+            int changed_w = changed.right - changed.left;
+            int changed_h = changed.bottom - changed.top;
+            int bbox_area = changed_w * changed_h;
+
+            /*
+             * Fast-changing GVT-g frames often appear as thousands of tiny
+             * dirty blocks. Sending those blocks independently causes visible
+             * horizontal/vertical temporal seams. If the changed blocks form a
+             * meaningful region, send their bounding box as one coherent frame.
+             * Avoid full-desktop coalescing by default so mouse and typing stay
+             * on the low-latency small-rect path.
+             */
+            bool fullscreen_like = qemu_spice_gvtg_fullscreen_coalesce() &&
+                bbox_area * 100 >= surface_area * qemu_spice_gvtg_fullscreen_percent();
+            bool bounded_region = bbox_area * 100 <= surface_area * 80;
+
+            if (changed_blocks >= qemu_spice_gvtg_bbox_min_blocks() &&
+                bbox_area >= 320 * 180 &&
+                (bounded_region || fullscreen_like) &&
+                changed_area * 100 >= bbox_area / blksize) {
+                QXLRect update = fullscreen_like ? (QXLRect) {
+                    .top = 0,
+                    .bottom = surface_height(ssd->ds),
+                    .left = 0,
+                    .right = surface_width(ssd->ds),
+                } : changed;
+
+                warn_report("gvtg-stats: bbox-coalesce blocks=%d bbox=%dx%d+%d+%d area=%d mode=%s",
+                            changed_blocks, changed_w, changed_h,
+                            changed.left, changed.top, bbox_area,
+                            fullscreen_like ? "fullscreen" : "region");
+                qemu_spice_create_one_update(ssd, &update);
+                memset(&ssd->dirty, 0, sizeof(ssd->dirty));
+                return;
+            }
+        }
+    }
 
     dirty_top = g_new(int, blocks);
     for (blk = 0; blk < blocks; blk++) {
         dirty_top[blk] = -1;
     }
 
-    guest = surface_data(ssd->ds);
-    mirror = (void *)pixman_image_get_data(ssd->mirror);
     for (y = ssd->dirty.top; y < ssd->dirty.bottom; y++) {
         yoff1 = y * surface_stride(ssd->ds);
         yoff2 = y * pixman_image_get_stride(ssd->mirror);
@@ -433,8 +672,10 @@ void qemu_spice_display_switch(SimpleSpiceDisplay *ssd,
     ssd->ds = surface;
     while ((update = QTAILQ_FIRST(&ssd->updates)) != NULL) {
         QTAILQ_REMOVE(&ssd->updates, update, next);
+        ssd->updates_count--;
         qemu_spice_destroy_update(ssd, update);
     }
+    ssd->updates_count = 0;
     qemu_mutex_unlock(&ssd->lock);
     if (need_destroy) {
         qemu_spice_destroy_host_primary(ssd);
@@ -447,6 +688,7 @@ void qemu_spice_display_switch(SimpleSpiceDisplay *ssd,
     }
 
     memset(&ssd->dirty, 0, sizeof(ssd->dirty));
+    ssd->gvtg_last_stream_ms = 0;
     ssd->notify++;
 
     qemu_mutex_lock(&ssd->lock);
@@ -489,12 +731,23 @@ void qemu_spice_cursor_refresh_bh(void *opaque)
 
 void qemu_spice_display_refresh(SimpleSpiceDisplay *ssd)
 {
+    int64_t now_ms;
+
     graphic_hw_update(ssd->dcl.con);
+    now_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     WITH_QEMU_LOCK_GUARD(&ssd->lock) {
-        if (QTAILQ_EMPTY(&ssd->updates) && ssd->ds) {
-            qemu_spice_create_update(ssd);
-            ssd->notify++;
+        if (ssd->ds) {
+            if (qemu_spice_gvtg_stream_fullscreen()) {
+                if (ssd->updates_count < qemu_spice_gvtg_stream_queue_depth() &&
+                    qemu_spice_gvtg_stream_due(ssd, now_ms)) {
+                    qemu_spice_gvtg_create_fullscreen_stream_frame(ssd, now_ms);
+                    ssd->notify++;
+                }
+            } else if (QTAILQ_EMPTY(&ssd->updates)) {
+                qemu_spice_create_update(ssd);
+                ssd->notify++;
+            }
         }
     }
 
@@ -540,6 +793,7 @@ static int interface_get_command(QXLInstance *sin, QXLCommandExt *ext)
     update = QTAILQ_FIRST(&ssd->updates);
     if (update != NULL) {
         QTAILQ_REMOVE(&ssd->updates, update, next);
+        ssd->updates_count--;
         *ext = update->ext;
         ret = true;
     }
@@ -735,6 +989,19 @@ static void display_switch(DisplayChangeListener *dcl,
 static void display_refresh(DisplayChangeListener *dcl)
 {
     SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
+
+    if (qemu_spice_gvtg_stream_fullscreen()) {
+        int fps = qemu_spice_gvtg_stream_fps();
+
+        /*
+         * The default simple-display refresh interval is 30 ms. Fullscreen
+         * stream mode deliberately sends one coherent frame per tick, so make
+         * the display timer match the requested stream cadence instead of
+         * paying the default wait after every completed full-frame copy.
+         */
+        dcl->update_interval = MAX(1, 1000 / fps);
+    }
+
     qemu_spice_display_refresh(ssd);
 }
 
@@ -1434,6 +1701,10 @@ void qemu_spice_display_init(void)
     int i;
 
     str = qemu_opt_get(opts, "display");
+    if (str && g_str_equal(str, "none")) {
+        qemu_spice_display_init_done();
+        return;
+    }
     if (str) {
         int head = qemu_opt_get_number(opts, "head", 0);
         Error *err = NULL;

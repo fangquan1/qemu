@@ -96,6 +96,7 @@ struct SimpleSpiceDisplay {
 
     QXLRect dirty;
     int notify;
+    int64_t gvtg_last_stream_ms;
 
     /*
      * All struct members below this comment can be accessed from
@@ -104,6 +105,7 @@ struct SimpleSpiceDisplay {
      */
     QemuMutex lock;
     QTAILQ_HEAD(, SimpleSpiceUpdate) updates;
+    int updates_count;
 
     /* cursor (without qxl): displaychangelistener -> spice server */
     SimpleSpiceCursor *ptr_define;

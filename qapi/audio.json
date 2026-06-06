@@ -439,6 +439,33 @@
     '*path': 'str' } }
 
 ##
+# @AudiodevGvtRtpOptions:
+#
+# Options of the experimental GVT RTP/Opus audio backend.
+#
+# @in: options of the capture stream
+#
+#     Unused; kept for common audio options.
+#
+# @out: options of the playback stream
+#
+# @host: target client host for RTP packets
+#
+# @port: target client UDP port, default 5006
+#
+# @bitrate: Opus target bitrate in bits per second, default 96000
+#
+# Since: 10.2
+##
+{ 'struct': 'AudiodevGvtRtpOptions',
+  'data': {
+    '*in':      'AudiodevPerDirectionOptions',
+    '*out':     'AudiodevPerDirectionOptions',
+    '*host':    'str',
+    '*port':    'uint16',
+    '*bitrate': 'uint32' } }
+
+##
 # @AudioFormat:
 #
 # An enumeration of possible audio formats.
@@ -484,6 +511,7 @@
             { 'name': 'sdl', 'if': 'CONFIG_AUDIO_SDL' },
             { 'name': 'sndio', 'if': 'CONFIG_AUDIO_SNDIO' },
             { 'name': 'spice', 'if': 'CONFIG_SPICE' },
+            'gvt-rtp',
             'wav' ] }
 
 ##
@@ -530,6 +558,7 @@
                    'if': 'CONFIG_AUDIO_SNDIO' },
     'spice':     { 'type': 'AudiodevGenericOptions',
                    'if': 'CONFIG_SPICE' },
+    'gvt-rtp':   'AudiodevGvtRtpOptions',
     'wav':       'AudiodevWavOptions' } }
 
 ##
