@@ -158,11 +158,8 @@ typedef struct GVTStreamDisplay {
     uint64_t kms_modeset_count;
     uint64_t publish_count;
     uint64_t publish_fail_count;
-    uint64_t publish_snapshot_count;
-    uint64_t publish_snapshot_fail_count;
     int64_t last_publish_ms;
     QemuDmaBuf *last_publish_dmabuf;
-    int publish_fb_index;
     bool kms_initialized;
     bool kms_disabled;
     bool kms_atomic;
@@ -173,7 +170,6 @@ typedef struct GVTStreamDisplay {
     bool encode_flip;
     egl_fb guest_fb;
     egl_fb capture_fb;
-    egl_fb publish_fb[3];
     bool verbose;
     bool import_test;
 } GVTStreamDisplay;
@@ -480,94 +476,6 @@ static void gvt_stream_publish_cursor_pos(uint32_t x, uint32_t y)
         gdpy->publish_fail_count++;
     }
     close(sock);
-}
-
-static void gvt_stream_publish_snapshot_dmabuf(GVTStreamDisplay *gdpy,
-                                               QemuDmaBuf *dmabuf,
-                                               int64_t now_ms,
-                                               bool force)
-{
-#ifdef CONFIG_GBM
-    g_autoptr(QemuDmaBuf) snapshot = NULL;
-    egl_fb *pub_fb;
-    uint32_t width, height, texture;
-    int fd[DMABUF_MAX_PLANES] = { -1, -1, -1, -1 };
-    uint32_t offsets[DMABUF_MAX_PLANES] = { 0 };
-    uint32_t strides[DMABUF_MAX_PLANES] = { 0 };
-    uint32_t fourcc = 0;
-    uint64_t modifier = 0;
-    int num_planes = 0;
-
-    if (!gdpy->publish_socket || !*gdpy->publish_socket || !dmabuf) {
-        return;
-    }
-    if (!force && gdpy->last_publish_dmabuf == dmabuf &&
-        now_ms - gdpy->last_publish_ms < 16) {
-        return;
-    }
-
-    egl_dmabuf_import_texture(dmabuf);
-    texture = qemu_dmabuf_get_texture(dmabuf);
-    if (!texture) {
-        gdpy->publish_snapshot_fail_count++;
-        if (gdpy->verbose || gdpy->publish_snapshot_fail_count <= 8) {
-            warn_report("gvt-stream-publish: snapshot import failed");
-        }
-        return;
-    }
-
-    width = qemu_dmabuf_get_width(dmabuf);
-    height = qemu_dmabuf_get_height(dmabuf);
-
-    if (gdpy->guest_fb.texture != texture ||
-        gdpy->guest_fb.width != width || gdpy->guest_fb.height != height) {
-        egl_fb_destroy(&gdpy->guest_fb);
-        egl_fb_setup_for_tex(&gdpy->guest_fb, width, height, texture, false);
-        gdpy->guest_fb.dmabuf = dmabuf;
-    }
-
-    gdpy->publish_fb_index = (gdpy->publish_fb_index + 1) %
-                             G_N_ELEMENTS(gdpy->publish_fb);
-    pub_fb = &gdpy->publish_fb[gdpy->publish_fb_index];
-    if (pub_fb->width != width || pub_fb->height != height) {
-        egl_fb_destroy(pub_fb);
-        egl_fb_setup_new_tex(pub_fb, width, height);
-    }
-
-    egl_fb_blit(pub_fb, &gdpy->guest_fb, qemu_dmabuf_get_y0_top(dmabuf));
-    glFinish();
-
-    if (!egl_dmabuf_export_texture(pub_fb->texture, fd,
-                                   (EGLint *)offsets, (EGLint *)strides,
-                                   (EGLint *)&fourcc, &num_planes,
-                                   &modifier)) {
-        gdpy->publish_snapshot_fail_count++;
-        if (gdpy->verbose || gdpy->publish_snapshot_fail_count <= 8) {
-            warn_report("gvt-stream-publish: snapshot export failed");
-        }
-        return;
-    }
-
-    snapshot = qemu_dmabuf_new(width, height, offsets, strides, 0, 0,
-                               width, height, fourcc, modifier, fd,
-                               num_planes, false, false);
-    qemu_dmabuf_set_texture(snapshot, pub_fb->texture);
-    gvt_stream_publish_dmabuf(gdpy, snapshot, now_ms, true);
-    qemu_dmabuf_close(snapshot);
-    gdpy->publish_snapshot_count++;
-    gdpy->last_publish_dmabuf = dmabuf;
-    gdpy->last_publish_ms = now_ms;
-
-    if (gdpy->verbose || gdpy->publish_snapshot_count <= 8 ||
-        gdpy->publish_snapshot_count % 60 == 0) {
-        error_report("gvt-stream-publish: snapshot #%" PRIu64
-                     " source=%s size=%ux%u",
-                     gdpy->publish_snapshot_count,
-                     gdpy->source_id ?: "vm", width, height);
-    }
-#else
-    gvt_stream_publish_dmabuf(gdpy, dmabuf, now_ms, force);
-#endif
 }
 
 static void gvt_stream_input_send_qcode(const char *name, bool down,
@@ -2562,9 +2470,6 @@ static void gvt_stream_scanout_disable(DisplayChangeListener *dcl)
     gvt_stream_kms_close(gdpy);
     egl_fb_destroy(&gdpy->guest_fb);
     egl_fb_destroy(&gdpy->capture_fb);
-    for (int i = 0; i < G_N_ELEMENTS(gdpy->publish_fb); i++) {
-        egl_fb_destroy(&gdpy->publish_fb[i]);
-    }
     g_clear_pointer(&gdpy->capture_surface, qemu_free_displaysurface);
     error_report("gvt-stream: scanout-disable console=%d",
                  qemu_console_get_index(dcl->con));
@@ -2624,7 +2529,7 @@ static void gvt_stream_scanout_dmabuf(DisplayChangeListener *dcl,
             error_report("gvt-stream: import-test unavailable without GBM");
 #endif
     }
-    gvt_stream_publish_snapshot_dmabuf(gdpy, dmabuf, now_ms, true);
+    gvt_stream_publish_dmabuf(gdpy, dmabuf, now_ms, true);
 }
 
 static void gvt_stream_cursor_dmabuf(DisplayChangeListener *dcl,
@@ -2719,7 +2624,7 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
 
     gvt_stream_capture_frame(gdpy, now_ms);
     gvt_stream_kms_present(gdpy);
-    gvt_stream_publish_snapshot_dmabuf(gdpy, gdpy->scanout, now_ms, false);
+    gvt_stream_publish_dmabuf(gdpy, gdpy->scanout, now_ms, false);
 
     if (now_ms - gdpy->last_report_ms >= gdpy->report_ms) {
         int64_t delta = now_ms - gdpy->last_report_ms;
@@ -2738,7 +2643,6 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      " atomic=%" PRIu64 " atomic_fallback=%" PRIu64
                      " pf=%" PRIu64 " ms=%" PRIu64
                      " publish=%" PRIu64 "/%" PRIu64
-                     " snapshot=%" PRIu64 "/%" PRIu64
                      " last_checksum=0x%016" PRIx64,
                      qemu_console_get_index(dcl->con), gdpy->report_updates,
                      delta, fps, x, y, w, h, gdpy->scanout_count,
@@ -2753,10 +2657,8 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                       gdpy->kms_commit_count, gdpy->kms_fail_count,
                       gdpy->kms_atomic_count, gdpy->kms_atomic_fallback_count,
                       gdpy->kms_page_flip_count, gdpy->kms_modeset_count,
-                     gdpy->publish_count, gdpy->publish_fail_count,
-                     gdpy->publish_snapshot_count,
-                     gdpy->publish_snapshot_fail_count,
-                     gdpy->last_capture_checksum);
+                      gdpy->publish_count, gdpy->publish_fail_count,
+                      gdpy->last_capture_checksum);
 
         gdpy->last_report_ms = now_ms;
         gdpy->report_updates = 0;
